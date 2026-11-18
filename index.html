@@ -172,6 +172,9 @@ body.kb #joyhint{display:none}
 #loading .in{text-align:center;width:min(92vw,480px)}
 #loading h1{font-size:clamp(24px,7vw,40px);margin:0 0 4px;line-height:.95}#loading h1 span{color:var(--amber)}
 #loading p{font-size:13px;color:rgba(255,255,255,.6);margin:10px 0 14px;min-height:18px}
+#loading.nowebgl .in{width:min(94vw,440px)}
+#loading .fallbackart{display:block;width:100%;height:auto;margin:0 auto 18px;border-radius:14px;box-shadow:0 0 60px rgba(255,148,36,.32),0 18px 40px rgba(0,0,0,.5),0 0 0 1px rgba(255,183,39,.4)}
+#loading.nowebgl #ltext{font-size:14px;line-height:1.55;margin:0;color:rgba(255,255,255,.75)}
 #lbar{height:8px;border-radius:5px;background:rgba(255,255,255,.12);overflow:hidden}
 #lbar i{display:block;height:100%;width:4%;background:linear-gradient(90deg,var(--amber),#ffe08a);border-radius:5px;transition:width .25s}
 #paw{font-size:44px;animation:bob 1s infinite ease-in-out;display:inline-block}
@@ -336,6 +339,29 @@ body.kb #joyhint{display:none}
 <div id="err"></div>
 
 <script type="module">
+/* Without WebGL there is no world to draw. Say so over the key art and stop here,
+   instead of leaving the loader spinning under a red error bar. */
+const _glProbe = (()=>{ try{
+  const c=document.createElement('canvas');
+  const g=c.getContext('webgl2')||c.getContext('webgl');
+  if(g){ const lose=g.getExtension('WEBGL_lose_context'); if(lose)lose.loseContext(); }
+  return !!g;
+}catch(e){ return false; } })();
+if(!_glProbe){
+  const ld=document.getElementById('loading'), box=ld&&ld.querySelector('.in');
+  if(box){
+    ld.classList.add('nowebgl');
+    const h=box.querySelector('h1'); if(h)h.remove();
+    const paw=document.getElementById('paw'); if(paw)paw.remove();
+    const bar=document.getElementById('lbar'); if(bar)bar.remove();
+    const art=document.createElement('img');
+    art.src='poster.webp'; art.alt='Grand Theft Doggo'; art.className='fallbackart';
+    box.prepend(art);
+    const t=document.getElementById('ltext');
+    if(t) t.textContent='This game draws its world with WebGL, and this browser is not providing it. Try another browser, or switch hardware acceleration back on.';
+  }
+  throw new Error('WebGL unavailable, showing the key art instead');
+}
 // 3D engine: three.js r170 from a CDN, with fallbacks
 const THREE = await (async()=>{ const V='0.170.0', urls=['https://cdnjs.cloudflare.com/ajax/libs/three.js/'+V+'/three.module.min.js','https://cdn.jsdelivr.net/npm/three@'+V+'/build/three.module.min.js','https://unpkg.com/three@'+V+'/build/three.module.min.js','./three.module.min.js'];
   for(const u of urls){ try{ const m=await import(u); if(m&&m.WebGLRenderer)return m; }catch(e){} } return null; })();
