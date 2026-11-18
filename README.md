@@ -1,5 +1,7 @@
 # Grand Theft Doggo
 
+![Grand Theft Doggo key art](poster.jpg)
+
 A browser game about being a good dog in a bad city, in a single self-contained HTML
 file. A loving parody of a certain open-world crime franchise, told from collar height.
 
