@@ -1567,76 +1567,112 @@ function carModelFor(kind,type,cp,count){ const mk=CARMODEL[kind]||CARMODEL[type
   cp.ly=cp.h*.36; cp.ty=cp.h*.38; cp.lx=cp.hw*.62;
   return {cp,model:true,paint:m,ms:[m],tint,spinA,spinK:cp.wheels[0].r/(R.wr*ws)}; }
 
-/* ---- Kenney character: skinned, run + idle clips, four skins ---- */
+/* ---- Quaternius "Man": skinned, one shared body, walk / run / idle / death clips, six shaded material zones ---- */
 const HUMAN_TOP=1.83/1.75;   // buildHuman: top of hair = 1.5s+.33s = 1.83s with s=H/1.75, so visible height is 1.046 H
-const MODEL_POSES=new Set(['walk','run','idle','wait','chat','lean','phone']);   // poses the run/idle clips can honestly show
+const MODEL_POSES=new Set(['walk','run','idle','wait','chat','lean','phone']);   // poses the walk/run/idle clips can honestly show
 const PROC_ROLES=new Set(['officer','medic','mail','vendor','thrower']), PROC_KINDS=new Set(['worker','granny']);   // props / uniforms the model lacks
-function prepChar(SU,gCh,gRun,gIdle){ const V=THREE.Vector3,tpl=new THREE.Group(); tpl.add(gCh.scene); const box=new THREE.Box3(),sz=new V();
+/* The file ships six meshes (one per material). Six skinned meshes per pedestrian would be six draw calls each, so they are
+   merged once at load into a single skinned mesh. The zone is kept as a UV: every vertex of a zone points at one texel of an
+   8x1 palette, so a pedestrian's colours (a tiny map) and each zone's roughness (one shared map) cost no extra draw calls and
+   no custom shader. Order here is also the texel order. */
+const MAN_ZONES={Shirt:0,Skin:1,Pants:2,Eyes:3,Socks:4,Hair:5};
+// The source file has metalness .4 on every zone, which is what makes it read as plastic: none of these is metal. Skin is the
+// smoothest cloth-free surface, eyes are glossy, hair and cloth are rough. These are the final roughness values (factor is 1).
+const MAN_ROUGH=[.88,.52,.92,.18,.95,.85];
+function manTex(px,srgb){ const t=new THREE.DataTexture(px,8,1,THREE.RGBAFormat); t.magFilter=t.minFilter=THREE.NearestFilter; t.generateMipmaps=false; if(srgb)t.colorSpace=THREE.SRGBColorSpace; t.needsUpdate=true; return t; }
+function mergeMan(root){ const sms=[]; root.traverse(n=>{ if(n.isSkinnedMesh)sms.push(n); }); if(sms.length<2)throw new Error('man meshes');
+  const first=sms[0],bones=first.skeleton.bones,get=(a,i,k)=>k===0?a.getX(i):k===1?a.getY(i):k===2?a.getZ(i):a.getW(i); let nv=0,ni=0;
+  for(const s of sms){ const g=s.geometry,A=g.attributes;
+    if(!A.position||!A.normal||!A.skinIndex||!A.skinWeight||!(s.material&&s.material.name in MAN_ZONES)||s.skeleton.bones.length!==bones.length||!s.skeleton.bones.every((b,i)=>b===bones[i])||!s.bindMatrix.equals(first.bindMatrix)||!s.matrix.equals(first.matrix))throw new Error('man mesh');
+    nv+=A.position.count; ni+=g.index?g.index.count:A.position.count; }
+  const pos=new Float32Array(nv*3),nor=new Float32Array(nv*3),sw=new Float32Array(nv*4),si=new Uint16Array(nv*4),uv=new Float32Array(nv*2),idx=nv>65535?new Uint32Array(ni):new Uint16Array(ni); let vo=0,io=0;
+  for(const s of sms){ const g=s.geometry,A=g.attributes,n=A.position.count,z=MAN_ZONES[s.material.name];
+    for(let i=0;i<n;i++){ const o=vo+i; for(let k=0;k<3;k++){ pos[o*3+k]=get(A.position,i,k); nor[o*3+k]=get(A.normal,i,k); } for(let k=0;k<4;k++){ sw[o*4+k]=get(A.skinWeight,i,k); si[o*4+k]=get(A.skinIndex,i,k); } uv[o*2]=(z+.5)/8; uv[o*2+1]=.5; }
+    if(g.index){ for(let i=0;i<g.index.count;i++)idx[io++]=vo+g.index.getX(i); } else for(let i=0;i<n;i++)idx[io++]=vo+i;
+    vo+=n; }
+  const geo=new THREE.BufferGeometry(); geo.setAttribute('position',new THREE.BufferAttribute(pos,3)); geo.setAttribute('normal',new THREE.BufferAttribute(nor,3)); geo.setAttribute('uv',new THREE.BufferAttribute(uv,2));
+  geo.setAttribute('skinIndex',new THREE.BufferAttribute(si,4)); geo.setAttribute('skinWeight',new THREE.BufferAttribute(sw,4)); geo.setIndex(new THREE.BufferAttribute(idx,1));
+  const m=new THREE.SkinnedMesh(geo,new THREE.MeshStandardMaterial()),par=first.parent; m.name='Man'; m.position.copy(first.position); m.quaternion.copy(first.quaternion); m.scale.copy(first.scale);
+  par.add(m); m.updateMatrixWorld(true); m.bind(first.skeleton,first.bindMatrix); for(const s of sms){ s.removeFromParent(); s.geometry.dispose(); } }
+function prepChar(SU,gm){ const V=THREE.Vector3,tpl=new THREE.Group(); mergeMan(gm.scene); tpl.add(gm.scene); const box=new THREE.Box3(),sz=new V();
   tpl.updateMatrixWorld(true); box.setFromObject(tpl,true); box.getSize(sz);
   if(sz.z>sz.y){ tpl.rotation.x=-PI/2; tpl.updateMatrixWorld(true); }          // long axis is Z: stand it up
-  const bone=n=>{ let b=null; tpl.traverse(o=>{ if(!b&&o.name===n)b=o; }); return b; },bf=bone('LeftFoot'),bt=bone('LeftToes');
+  // three.js strips the dots from node names, so the rig's Foot.L and Foot.L_end arrive as FootL and FootL_end
+  const bone=n=>{ let b=null; tpl.traverse(o=>{ if(!b&&o.name===n)b=o; }); return b; },bf=bone('FootL'),bt=bone('FootL_end');
   if(bf&&bt){ const a=new V(),b=new V(); bf.getWorldPosition(a); bt.getWorldPosition(b); if(b.z<a.z-1e-3){ tpl.rotation.y=PI; tpl.updateMatrixWorld(true); } }   // toes must point +z like the procedural body
-  const clipOf=(g,re)=>g.animations.find(a=>re.test(a.name)),run=clipOf(gRun,/Run$/),idle=clipOf(gIdle,/Idle$/); if(!run||!idle)throw new Error('clips');
-  const probe=SU.clone(tpl),mx=new THREE.AnimationMixer(probe); let minY=Infinity,hI=0;
-  const sample=(clip,t,first)=>{ mx.stopAllAction(); mx.clipAction(clip).play(); mx.setTime(t); probe.updateMatrixWorld(true); box.setFromObject(probe,true); minY=Math.min(minY,box.min.y); if(first)hI=box.max.y-box.min.y; };
-  sample(idle,0,true); sample(idle,idle.duration*.5); for(const f of[0,.25,.5,.75])sample(run,run.duration*f);
-  // Ground speed the run clip actually covers at timeScale 1, in body heights per second: how fast the planted foot travels back
+  const clipOf=re=>gm.animations.find(a=>re.test(a.name)),run=clipOf(/Run$/),walk=clipOf(/Walk$/),idle=clipOf(/Idle$/),death=clipOf(/Death$/); if(!run||!walk||!idle)throw new Error('clips');   // death is optional: without it the old tip-over rotation is used
+  const probe=SU.clone(tpl),mx=new THREE.AnimationMixer(probe); let minY=Infinity,hI=0,cz0=0,bb=[0,0,0,0];
+  const sample=(clip,t,first)=>{ mx.stopAllAction(); mx.clipAction(clip).play(); mx.setTime(t); probe.updateMatrixWorld(true); box.setFromObject(probe,true); minY=Math.min(minY,box.min.y); if(first){ hI=box.max.y-box.min.y; cz0=(box.min.z+box.max.z)/2; bb=[box.min.y,box.max.y,box.min.z,box.max.z]; } };
+  sample(idle,0,true); sample(idle,idle.duration*.5); for(const f of[0,.25,.5,.75]){ sample(walk,walk.duration*f); sample(run,run.duration*f); }
+  // Ground speed a clip actually covers at timeScale 1, in body heights per second: how fast the planted foot travels back
   // relative to the hips. Playing the clip at (ped speed / that) keeps the feet from skating.
-  const pb={}; probe.traverse(n=>{ if(n.name==='LeftFoot'||n.name==='Hips')pb[n.name]=n; }); let gs=0;
-  if(pb.LeftFoot&&pb.Hips){ const N=40,fz=[],fy=[],a=new V(),b=new V(); for(let i=0;i<=N;i++){ mx.stopAllAction(); mx.clipAction(run).play(); mx.setTime(run.duration*i/N); probe.updateMatrixWorld(true); pb.LeftFoot.getWorldPosition(a); pb.Hips.getWorldPosition(b); fz.push(a.z-b.z); fy.push(a.y); }
-    const lim=Math.min(...fy)+.03*hI; let sum=0,n=0; for(let i=1;i<=N;i++)if(fy[i]<lim&&fy[i-1]<lim){ sum+=-(fz[i]-fz[i-1])/(run.duration/N); n++; } if(n>2&&sum>0)gs=sum/n/hI; }
-  mx.stopAllAction(); if(!(hI>0)||!isFinite(minY))throw new Error('char measure');
-  return {scene:tpl,run,idle,hI,minY,gs,SU,skins:[],mats:{},base:null}; }
-async function loadChars(GLTFLoader,SU){ const ld=new GLTFLoader(),L=n=>ld.loadAsync('assets/chars/'+n+'.glb');
-  const [gc,gr,gi]=await Promise.all([L('character'),L('run'),L('idle')]);
-  const skins=await Promise.all(['criminalMaleA','skaterMaleA','skaterFemaleA','cyborgFemaleA'].map(n=>loadTex('assets/chars/Skins/'+n+'.png',{srgb:true,flipY:false})));
-  if(!skins.some(Boolean))return; const C=prepChar(SU,gc,gr,gi); C.skins=skins;
-  // The skins are UV atlases (face, shirt panel, shoes and limbs laid out as islands), so a map is only correct if it is
-  // sampled 1:1 by the same UVs as the skin. These two maps share the atlas layout and must never be tiled or given a
-  // repeat: tiling an atlas scrambles the islands across the body. Roughness separates skin, hair and cloth; the normal map
-  // is a coarse cloth weave masked to the clothing. Each one that fails to load stays null and that body keeps the plain
-  // skin with the base roughness, so a bad download never leaves an invisible or black pedestrian.
-  const NAMES=['criminalMaleA','skaterMaleA','skaterFemaleA','cyborgFemaleA'];
-  C.detail=await Promise.all(NAMES.map(async n=>{ try{ const [nr,ro]=await Promise.all([
-      loadTex('assets/chars/Fabric/'+n+'_nor.png',{srgb:false,flipY:false}),
-      loadTex('assets/chars/Fabric/'+n+'_rough.png',{srgb:false,flipY:false})]);
-    return (nr||ro)?{nr,ro}:null; }catch(e){ return null; } }));
-  C.base=new THREE.MeshStandardMaterial({roughness:.85,metalness:0});   // also the look a body keeps if its maps fail to load
+  const pb={}; probe.traverse(n=>{ if(n.name==='FootL'||n.name==='Hips')pb[n.name]=n; });
+  const groundSpeed=clip=>{ if(!pb.FootL||!pb.Hips)return 0; const N=40,fz=[],fy=[],a=new V(),b=new V(); for(let i=0;i<=N;i++){ mx.stopAllAction(); mx.clipAction(clip).play(); mx.setTime(clip.duration*i/N); probe.updateMatrixWorld(true); pb.FootL.getWorldPosition(a); pb.Hips.getWorldPosition(b); fz.push(a.z-b.z); fy.push(a.y); }
+    const lim=Math.min(...fy)+.03*hI; let sum=0,n=0; for(let i=1;i<=N;i++)if(fy[i]<lim&&fy[i-1]<lim){ sum+=-(fz[i]-fz[i-1])/(clip.duration/N); n++; } return n>2&&sum>0?sum/n/hI:0; };
+  const gsRun=groundSpeed(run),gsWalk=groundSpeed(walk);
+  // Where the Death clip leaves the body: lying along its heading with its feet at the origin. dy lifts it so the lowest point
+  // rests on the pavement, dz slides it back so the body is centred on the pedestrian instead of lying out in front of them.
+  let dy=0,dz=0; if(death){ const stand=minY; sample(death,death.duration*.999); dy=Math.max(0,stand-box.min.y); dz=(box.min.z+box.max.z)/2-cz0; minY=stand; }   // sample() folds into minY, which must stay the standing floor
+  mx.stopAllAction(); if(!(hI>0)||!isFinite(minY)||!isFinite(dy)||!isFinite(dz))throw new Error('char measure');
+  return {scene:tpl,run,walk,idle,death,hI,minY,gsRun,gsWalk,dy,dz,bb,SU,mats:{},rough:null}; }
+// Quaternius "Man" (CC0 1.0 public domain, https://creativecommons.org/publicdomain/zero/1.0/), via Poly Pizza:
+// https://poly.pizza/m/HMnuH5geEG , file https://static.poly.pizza/3746be88-6799-4817-929b-6bc067c47caa.glb
+// 3,967 vertices, 1,852 triangles, 31 joints, 6 material zones, no textures. Clips used: Idle, Walk, Run, Death.
+async function loadChars(GLTFLoader,SU){ const gm=await new GLTFLoader().loadAsync('assets/chars/quaternius_man.glb'); const C=prepChar(SU,gm);
+  const px=new Uint8Array(32); for(let z=0;z<8;z++){ px[z*4]=255; px[z*4+1]=Math.round(255*(MAN_ROUGH[z]===undefined?1:MAN_ROUGH[z])); px[z*4+3]=255; }   // G channel is roughness
+  C.rough=manTex(px,false);
   if(ASSETS.closed)return; ASSETS.chars=C; }
-function pedMat(o){ const C=ASSETS.chars,fem=!!o.skirt||(o.face>=0&&FACES[o.face]&&!!FACES[o.face].g);
-  let pool=(fem?[2,2,2,3]:[0,1]).filter(i=>C.skins[i]); if(!pool.length)pool=[0,1,2,3].filter(i=>C.skins[i]); const si=pool[Math.floor(Math.random()*pool.length)];
-  const sc=new C3(o.jacket||o.shirt||'#ffffff'),t=new C3(1,1,1).lerp(sc,.26),q=v=>Math.round(v*6)/6; t.setRGB(q(t.r),q(t.g),q(t.b)); const key=si+'|'+t.getHexString();
-  if(!C.mats[key]){ const m=C.base.clone(); m.map=C.skins[si]; m.color.copy(t).multiplyScalar(.95);
-    // The diffuse map stays the untouched skin. The atlas-aligned maps ride along with the skin they were built for. The
-    // roughness map already holds the final values (skin .62, hair .74, cloth .90), so the material factor is 1.
-    const det=C.detail&&C.detail[si]; if(det){ if(det.nr){m.normalMap=det.nr; m.normalScale=new THREE.Vector2(.6,.6);} if(det.ro){m.roughnessMap=det.ro; m.roughness=1;} }
-    m.metalness=0;
-    C.mats[key]=m; } return C.mats[key]; }
-// Adds a skinned model next to the procedural body. The procedural body stays built and is shown for every pose the clips cannot do.
+// One material per distinct set of zone colours, each with its own 8x1 palette, all sharing one program and one roughness map.
+// The palette follows the procedural body's own colours so a person keeps the shirt, trousers, hair and skin they were given.
+function pedMat(o){ const C=ASSETS.chars,col=s=>new C3(s); const sk=col(o.skin||rpick(SKINS)); sk.r*=1.02; sk.g*=.96; sk.b*=.9;   // slightly warm skin
+  const zc=[col(o.jacket||o.shirt||rpick(SHIRTS)).multiplyScalar(.95),sk,col(o.pants||rpick(PANTS)),col('#0d0b0a'),col(o.shoes||rpick(SHOES)),col(o.hair||rpick(HAIRS))];
+  const key=zc.map(c=>c.getHexString()).join(''); let m=C.mats[key]; if(m)return m;
+  const ks=Object.keys(C.mats); if(ks.length>=96)return C.mats[ks[Math.floor(Math.random()*ks.length)]];   // bounded: a long session must not mint a material per respawn
+  const px=new Uint8Array(32); for(let z=0;z<8;z++){ const c=zc[z]||zc[0],h=c.getHex(); px[z*4]=h>>16&255; px[z*4+1]=h>>8&255; px[z*4+2]=h&255; px[z*4+3]=255; }
+  m=new THREE.MeshStandardMaterial({map:manTex(px,true),roughnessMap:C.rough,roughness:1,metalness:0}); C.mats[key]=m; return m; }
+// Adds a skinned model next to the procedural body. The procedural body stays built and is shown only for people who never got a model.
 function attachPedModel(h,o,role){ const C=ASSETS.chars; if(!C||PROC_ROLES.has(role)||PROC_KINDS.has(o.kind))return; try{
     const root=C.SU.clone(C.scene),g=new THREE.Group(); g.add(root); let sm=null; root.traverse(n=>{ if(n.isSkinnedMesh)sm=n; }); if(!sm)return;
     const k=h.H*HUMAN_TOP/C.hI,wx=1+((o.wide||1)-1)*.6; g.scale.set(k*wx,k,k*wx); g.position.y=-h.hipY-C.minY*k;   // heel of the lowest foot sits on y=0
     sm.material=pedMat(o); sm.frustumCulled=false; sm.castShadow=true; sm.receiveShadow=true;
-    const mixer=new THREE.AnimationMixer(root),run=mixer.clipAction(C.run),idle=mixer.clipAction(C.idle); idle.play(); idle.time=Math.random()*C.idle.duration; g.visible=false; h.inner.add(g);
-    // baseY is where the standing model rests; lift is how far to raise it once tipped flat so the torso, not the head,
-    // sits on the pavement. Both are baked here because the model's own scale is only known at attach time.
-    h.mdl={g,sm,mixer,run,idle,cur:idle,v1:C.gs>0?C.gs*h.H*HUMAN_TOP:0,baseY:g.position.y,lift:h.H*.40}; }catch(e){ h.mdl=null; } }
-// Poses where the body is on the ground rather than upright. The character model only has run and idle clips, so for
-// these the whole model group is tipped over instead: lying flat, dragged along the floor, or airborne and tumbling.
+    // One mixer per pedestrian, as before: it only ever blends two actions, and only ones in view are stepped every frame.
+    const mixer=new THREE.AnimationMixer(root),run=mixer.clipAction(C.run),walk=mixer.clipAction(C.walk),idle=mixer.clipAction(C.idle),dead=C.death?mixer.clipAction(C.death):null;
+    if(dead){ dead.setLoop(THREE.LoopOnce,1); dead.clampWhenFinished=true; }
+    idle.play(); idle.time=Math.random()*C.idle.duration; g.visible=false; h.inner.add(g);
+    // baseY is where the standing model rests. lift only serves the flung pose (a fixed raise so the tumble pivots near the belly);
+    // a tipped body is raised by an amount worked out from its rotated bounds (bb, k). dy and dz place the Death clip's lying pose.
+    // All baked here because the model's scale is only known at attach time.
+    h.mdl={g,sm,mixer,run,walk,idle,dead,cur:idle,rising:false,ly:0,lz:0,vR:C.gsRun>0?C.gsRun*h.H*HUMAN_TOP:0,vW:C.gsWalk>0?C.gsWalk*h.H*HUMAN_TOP:0,baseY:g.position.y,lift:h.H*.40,dy:C.dy*k,dz:C.dz*k,bb:C.bb,k}; }catch(e){ h.mdl=null; } }
+// Tip-over fallback, used only for poses the clips cannot show (dizzy, getup) and for every fall pose if the file has no Death clip.
 const MDL_PRONE={down:-1.52,drag:-1.42,flung:-.55,dizzy:-.35,slip:-1.2,getup:-.9};
-function pedModelStep(md,pose,speed,dt,spin,t){ const loco=speed>.15&&(pose==='walk'||pose==='run'||pose==='phone'),want=loco?md.run:md.idle;
+// Poses that play the real Death clip. It is played once and held; leaving the pose plays it backwards, which is the getting up.
+const MDL_FALL=new Set(['down','drag','flung','slip']);
+function pedModelStep(md,pose,speed,dt,spin,t){ const dA=md.dead,fall=!!dA&&MDL_FALL.has(pose),loco=!fall&&speed>.15&&(pose==='walk'||pose==='run'||pose==='phone');
   // p.spin is only assigned once a person has been flung, so it arrives undefined for everyone else. Keep the tip maths
   // on a real number or a single undefined frame writes NaN into the model transform and the body disappears.
-  const sp=Number.isFinite(spin)?spin:0;
+  const sp=Number.isFinite(spin)?spin:0,a=Math.min(1,12*dt);
   // Tip the model in its own space. g sits inside h.inner, so this rotates with the body heading and does not fight it.
-  const target=(pose in MDL_PRONE)?MDL_PRONE[pose]:0, k=12;
+  // A pose the Death clip already lies down is not also tipped, or it would be rotated twice.
+  const tipped=!fall&&(pose in MDL_PRONE),target=tipped?MDL_PRONE[pose]:0;
   if(pose==='flung'){ md.g.rotation.x=sp+Math.sin(t*17)*.16; md.g.rotation.z=Math.sin(t*13)*.22; }
-  else { md.g.rotation.x+= (target-md.g.rotation.x)*Math.min(1,k*dt); md.g.rotation.z+= (0-md.g.rotation.z)*Math.min(1,k*dt); }
-  // A prone body has to sit on the floor: the untipped model stands on y=0, so tipping it lifts the hips and drops the
-  // head through the ground. Lift by half the body depth so the torso rests on the surface instead of sinking into it.
-  const lie=(pose in MDL_PRONE); md.g.position.y=md.baseY+(lie?md.lift:0);
-  if(want!==md.cur){ const from=md.cur; md.cur=want; want.reset(); want.time=Math.random()*want.getClip().duration; want.play(); from.crossFadeTo(want,.2,false); }
-  if(loco)md.run.timeScale=clamp(md.v1>0?speed/md.v1:speed*.37,.25,2.2);   // clip's own ground speed (measured in prepChar) so the planted foot matches the pavement; idle plays at 1
+  else { md.g.rotation.x+= (target-md.g.rotation.x)*a; md.g.rotation.z+= (0-md.g.rotation.z)*a; }
+  // Standing up: if the body is down or falling and the pose is no longer a fall pose, run the Death clip backwards to the standing frame.
+  if(dA){ const dur=dA.getClip().duration;
+    if(fall&&md.rising){ md.rising=false; dA.timeScale=1; }
+    else if(!fall&&md.cur===dA&&!md.rising&&dA.time>.15){ md.rising=true; dA.paused=false; dA.timeScale=-dur/.85; }
+    if(md.rising&&dA.time<=.03){ md.rising=false; dA.timeScale=1; } }
+  const want=(fall||md.rising)?dA:loco?(speed>(md.cur===md.run?2.3:2.9)?md.run:md.walk):md.idle;
+  if(want!==md.cur){ const from=md.cur; md.cur=want; want.reset(); want.timeScale=1; want.time=want===dA?0:Math.random()*want.getClip().duration; want.play(); from.crossFadeTo(want,want===dA?.1:.2,false); }
+  if(want===md.run)md.run.timeScale=clamp(md.vR>0?speed/md.vR:speed*.27,.5,2.2);   // each clip's own ground speed (measured in prepChar) so the planted foot matches the pavement; idle plays at 1
+  else if(want===md.walk)md.walk.timeScale=clamp(md.vW>0?speed/md.vW:speed*.64,.35,1.9);
+  // A prone body has to sit on the floor. Rotated about its feet, the back of the body dips below the pavement, so raise it by
+  // exactly the lowest rotated corner of the standing bounds (zero when upright, about a hand's depth when lying flat).
+  // Clip: the lying pose is raised and slid to rest on the surface, in step with how far the fall has played (a body still
+  // standing must not be shoved sideways). Eased so a hand-off between poses does not pop.
+  const inD=!!dA&&md.cur===dA,pr=inD?clamp(dA.time/(dA.getClip().duration*.7),0,1):0,th=md.g.rotation.x,cs=Math.cos(th),sn=Math.sin(th),bb=md.bb;
+  const lo=Math.min(bb[0]*cs-bb[2]*sn,bb[0]*cs-bb[3]*sn,bb[1]*cs-bb[2]*sn,bb[1]*cs-bb[3]*sn);
+  const liftT=pose==='flung'?md.lift:inD?pr*md.dy:Math.max(0,bb[0]-lo)*md.k,zT=inD&&pose!=='flung'?-pr*md.dz:0;
+  md.ly+=(liftT-md.ly)*a; md.lz+=(zT-md.lz)*a; md.g.position.y=md.baseY+md.ly; md.g.position.z=md.lz;
   md.mixer.update(dt); }
 /* A pedestrian is only ever one body: see the draw loop, which hides the procedural figure for every pose once a
    skinned model is attached. The procedural body exists only for people who never got a model. */
@@ -2603,8 +2639,8 @@ const Peds={list:[],poops:[],busker:null,fr:0,
         const live=d2<62*62||p.state==='flung',md=p.h.mdl;
         /* Once a skinned model exists it is the only body ever drawn, for every pose. Swapping back to the procedural
            figure for the poses the clips cannot show made people visibly change body model mid-scene, which read as
-           the assets flipping on and off. A pose the clips cannot express is played as idle: wrong posture is a much
-           smaller flaw than a pedestrian turning into a different person. */
+           the assets flipping on and off. Falls play the Death clip; the few other poses without a clip are tipped or
+           played as idle: wrong posture is a much smaller flaw than a pedestrian turning into a different person. */
         if(md){ p.h.mesh.visible=false; p.h.lo.visible=false; md.g.visible=true; md.sm.castShadow=sh; if(live||((this.fr+i)&3)===0)pedModelStep(md,pose,p.speed,live?dt:dt*4,spin,t); }
         else if(live||((this.fr+i)&3)===0)animHuman(p.h,live?dt:dt*4,t,pose,p.speed);
         if(d2<58*58){ const lie=pose==='down'||pose==='drag'; Blobs.add(p.x,groundH(p.x,p.z),p.z,lie?.55:.62,lie?1.5:.62,p.yaw); } }
