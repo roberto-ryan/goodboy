@@ -1467,8 +1467,44 @@ async function loadSurfaces(){ const U='assets/tex/';
     const [d,n,r]=await Promise.all([loadTex(U+name+'_diff.jpg',{srgb:true,rep}),loadTex(U+name+'_nor.jpg',{rep}),loadTex(U+name+'_rough.jpg',{rep})]);
     if(!d)return;                                   // no photo, keep the procedural canvas map and normals untouched
     mat.map=d; if(n)mat.normalMap=n; if(r){ mat.roughnessMap=r; mat.roughness=1; } if(tone)mat.color.setScalar(tone); mat.needsUpdate=true; };
-  const pl=await Promise.all([ swap(Mat.asphalt,'road',PHOTO.roadM,PHOTO.roadUV,.66), swap(Mat.walk,'walk',PHOTO.walkM,PHOTO.walkUV,1.25), loadTex(U+'plaster_diff.jpg',{srgb:true,rep:1}) ]).then(a=>a[2]);
-  if(pl){ plasterFacades(pl); } }
+  const pl=await Promise.all([ swap(Mat.asphalt,'road',PHOTO.roadM,PHOTO.roadUV,.66), swap(Mat.walk,'walk',PHOTO.walkM,PHOTO.walkUV,1.25) ]).then(a=>a[1]);
+  await loadWalls(); }
+/* Every building style gets its own photographic wall, mapped in world space so one tile is WALL_TILE metres on any
+   building, and restricted to the wall areas by the atlas's own ORM green channel (walls, not frames or glass). The
+   photo replaces the painted wall colour instead of being multiplied into it, keeps the baked windows on top, and the
+   per-building vertex colour comes back at a fraction so neighbours still vary without turning the photo into a tint. */
+const WALL_TILE=2.6;
+async function loadWalls(){ const U='assets/tex/'; await Promise.all(Object.keys(Mat.facade).map(async k=>{
+    const m=Mat.facade[k]; if(k==='glass'||!m)return;              // a curtain wall is panes, not masonry
+    const [d,n,r]=await Promise.all([loadTex(U+k+'_diff.jpg',{srgb:true}),loadTex(U+k+'_nor.jpg'),loadTex(U+k+'_rough.jpg')]);
+    if(!d)return;                                                   // missing file leaves that style exactly as it was
+    wallFacade(m,d,n,r); })); }
+function wallFacade(m,d,n,r){ m.onBeforeCompile=sh=>{ sh.uniforms.uWl={value:d}; sh.uniforms.uWn={value:n||d}; sh.uniforms.uWr={value:r||d}; sh.uniforms.uWs={value:1/WALL_TILE}; sh.uniforms.uWnOn={value:n?1:0};
+    sh.vertexShader=sh.vertexShader.replace('#include <common>','#include <common>\nvarying vec3 vWlP; varying vec3 vWlN;').replace('#include <project_vertex>','#include <project_vertex>\n vWlP=(modelMatrix*vec4(transformed,1.0)).xyz; vWlN=normalize(mat3(modelMatrix)*objectNormal);');
+    sh.fragmentShader=sh.fragmentShader.replace('#include <common>','#include <common>\nvarying vec3 vWlP; varying vec3 vWlN; uniform sampler2D uWl; uniform sampler2D uWn; uniform float uWs; uniform float uWnOn;')
+      .replace('#include <map_fragment>','#include <map_fragment>\n'+WALL_MAP_GLSL)
+      .replace('#include <normal_fragment_maps>','#include <normal_fragment_maps>\n'+WALL_NORM_GLSL);
+  };
+  m.needsUpdate=true; }
+// GLSL kept as plain strings so the shader source never has to be escaped inside a template literal.
+const WALL_MAP_GLSL=[
+'      { vec3 an=abs(vWlN); vec2 wu=an.y>.7?vWlP.xz:(an.x>an.z?vWlP.zy:vWlP.xy); wu*=uWs;',
+'        vec3 photo=texture2D(uWl,wu).rgb;',
+'        float wall=smoothstep(.30,.55,texture2D(roughnessMap,vRoughnessMapUv).g);   // ORM green: wall 228 (.89), frame 150 (.59), glass 26 (.10). The map is sRGB-decoded to ~.76 on walls, so the band has to sit well below that or the mask never opens.',
+'        vec3 base=diffuseColor.rgb/max(vec3(0.02),vec3(dot(diffuseColor.rgb,vec3(.333))));',
+'        // The photo supplies the surface detail and most of the colour. The building\'s own atlas tint stays at 18%',
+'        // so a row of buildings does not become one identical wall.',
+'        vec3 lit=photo*(.80+.20*clamp(dot(base,vec3(.333)),0.0,2.0));',
+'        vec3 tinted=lit*mix(vec3(1.0),base,0.18);',
+'        diffuseColor.rgb=mix(diffuseColor.rgb,tinted,wall);',
+'      }'].join('\n');
+const WALL_NORM_GLSL=[
+'      if(uWnOn>.5){ vec3 aN=abs(vWlN); vec2 nu=aN.y>.7?vWlP.xz:(aN.x>aN.z?vWlP.zy:vWlP.xy); nu*=uWs;',
+'        vec3 tn=texture2D(uWn,nu).xyz*2.0-1.0;',
+'        vec3 tT=aN.y>.7?vec3(1.0,0.0,0.0):(aN.x>aN.z?vec3(0.0,0.0,1.0):vec3(1.0,0.0,0.0));',
+'        vec3 tB=cross(normal,tT); tT=cross(tB,normal);',
+'        vec3 wn=normalize(tT*tn.x+tB*tn.y+normal*tn.z);',
+'        normal=normalize(mix(normal,wn,.85)); }'].join('\n');
 // Plaster photo multiplied into the wall areas of the plaster-like facade styles. Mapped in world space (so one tile is
 // plasterM metres on any wall), masked by the ORM roughness (walls only, not frames or glass), and multiplied into the
 // existing map and vertex colours rather than replacing them.
@@ -1568,6 +1604,8 @@ function pedModelStep(md,pose,speed,dt){ const loco=speed>.15&&(pose==='walk'||p
   if(want!==md.cur){ const from=md.cur; md.cur=want; want.reset(); want.time=Math.random()*want.getClip().duration; want.play(); from.crossFadeTo(want,.2,false); }
   if(loco)md.run.timeScale=clamp(md.v1>0?speed/md.v1:speed*.37,.25,2.2);   // clip's own ground speed (measured in prepChar) so the planted foot matches the pavement; idle plays at 1
   md.mixer.update(dt); }
+/* A pedestrian is only ever one body: see the draw loop, which hides the procedural figure for every pose once a
+   skinned model is attached. The procedural body exists only for people who never got a model. */
 
 async function loadAssets(){ const A=ASSETS; let GL=null,SU=null;
   if(THREE_URL===JSD_BASE+'build/three.module.min.js'){ try{ const m=await withTimeout(Promise.all([import(JSD_BASE+'examples/jsm/loaders/GLTFLoader.js'),import(JSD_BASE+'examples/jsm/utils/SkeletonUtils.js')]),15000); if(m){ GL=m[0].GLTFLoader; SU=m[1]; } }catch(e){} }
@@ -2529,8 +2567,12 @@ const Peds={list:[],poops:[],busker:null,fr:0,
       const g=p.h.g, d2=dist2(p.x,p.z,cx,cz), vis=d2<125*125&&(d2<81||((p.x-cx)*cfx+(p.z-cz)*cfz)>cview*Math.sqrt(d2)); g.visible=vis;
       if(vis){ g.position.set(p.x,p.y,p.z); g.rotation.y=p.yaw; const inn=p.h.inner; inn.rotation.x=spin?spin:damp(inn.rotation.x,0,12,dt); const hi=d2<NEAR2||p.state==='grabbed'||p.state==='latched',sh=dd<QL.shadowR+3; p.h.mesh.visible=hi; p.h.lo.visible=!hi; p.h.mesh.castShadow=sh; p.h.lo.castShadow=sh;
         const live=d2<62*62||p.state==='flung',md=p.h.mdl;
-        if(md&&MODEL_POSES.has(pose)){ p.h.mesh.visible=false; p.h.lo.visible=false; md.g.visible=true; md.sm.castShadow=sh; if(live||((this.fr+i)&3)===0)pedModelStep(md,pose,p.speed,live?dt:dt*4); }   // skinned model for walk/idle poses
-        else { if(md)md.g.visible=false; if(live||((this.fr+i)&3)===0)animHuman(p.h,live?dt:dt*4,t,pose,p.speed); }
+        /* Once a skinned model exists it is the only body ever drawn, for every pose. Swapping back to the procedural
+           figure for the poses the clips cannot show made people visibly change body model mid-scene, which read as
+           the assets flipping on and off. A pose the clips cannot express is played as idle: wrong posture is a much
+           smaller flaw than a pedestrian turning into a different person. */
+        if(md){ p.h.mesh.visible=false; p.h.lo.visible=false; md.g.visible=true; md.sm.castShadow=sh; if(live||((this.fr+i)&3)===0)pedModelStep(md,pose,p.speed,live?dt:dt*4); }
+        else if(live||((this.fr+i)&3)===0)animHuman(p.h,live?dt:dt*4,t,pose,p.speed);
         if(d2<58*58){ const lie=pose==='down'||pose==='drag'; Blobs.add(p.x,groundH(p.x,p.z),p.z,lie?.55:.62,lie?1.5:.62,p.yaw); } }
     } },
   react(p,dd){ if(Dog.state==='ragdoll'||Dog.state==='ko'){ if(dd<8&&p.talkCD<=0){ say(p,'HIT'); p.talkCD=7; } return; }
