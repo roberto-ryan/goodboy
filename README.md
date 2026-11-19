@@ -7,6 +7,10 @@ file. A loving parody of a certain open-world crime franchise, told from collar 
 
 **Play:** https://roberto-ryan.github.io/goodboy/
 
+Unofficial fan parody. Not affiliated with, endorsed by, or sponsored by Rockstar Games
+or Take-Two Interactive. Grand Theft Auto is their trademark; this game contains no
+assets from it.
+
 ## Running locally
 
 Open `index.html` in a browser. There is no build step and no server required.
