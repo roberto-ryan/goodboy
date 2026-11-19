@@ -1591,24 +1591,26 @@ async function loadChars(GLTFLoader,SU){ const ld=new GLTFLoader(),L=n=>ld.loadA
   const [gc,gr,gi]=await Promise.all([L('character'),L('run'),L('idle')]);
   const skins=await Promise.all(['criminalMaleA','skaterMaleA','skaterFemaleA','cyborgFemaleA'].map(n=>loadTex('assets/chars/Skins/'+n+'.png',{srgb:true,flipY:false})));
   if(!skins.some(Boolean))return; const C=prepChar(SU,gc,gr,gi); C.skins=skins;
-  // The shipped skins are almost flat colour, so a lit body reads as painted plastic. These detail maps carry the cloth
-  // weave and give the surface something to catch light with. Any that fail to load simply stay null and the body falls
-  // back to the plain skin, so a bad download never leaves an invisible pedestrian.
+  // The skins are UV atlases (face, shirt panel, shoes and limbs laid out as islands), so a map is only correct if it is
+  // sampled 1:1 by the same UVs as the skin. These two maps share the atlas layout and must never be tiled or given a
+  // repeat: tiling an atlas scrambles the islands across the body. Roughness separates skin, hair and cloth; the normal map
+  // is a coarse cloth weave masked to the clothing. Each one that fails to load stays null and that body keeps the plain
+  // skin with the base roughness, so a bad download never leaves an invisible or black pedestrian.
   const NAMES=['criminalMaleA','skaterMaleA','skaterFemaleA','cyborgFemaleA'];
-  C.detail=await Promise.all(NAMES.map(async n=>{ try{ const [d,nr,ro]=await Promise.all([
-      loadTex('assets/chars/Fabric/'+n+'_diff.jpg',{srgb:true,flipY:false}),
-      loadTex('assets/chars/Fabric/'+n+'_nor.jpg',{srgb:false,flipY:false}),
-      loadTex('assets/chars/Fabric/'+n+'_rough.jpg',{srgb:false,flipY:false})]);
-    if(!d)return null; for(const t of [d,nr,ro])if(t){ t.wrapS=t.wrapT=THREE.RepeatWrapping; t.repeat.set(3,3); }
-    return {d,nr,ro}; }catch(e){ return null; } }));
-  C.base=new THREE.MeshStandardMaterial({roughness:.72,metalness:0});
+  C.detail=await Promise.all(NAMES.map(async n=>{ try{ const [nr,ro]=await Promise.all([
+      loadTex('assets/chars/Fabric/'+n+'_nor.png',{srgb:false,flipY:false}),
+      loadTex('assets/chars/Fabric/'+n+'_rough.png',{srgb:false,flipY:false})]);
+    return (nr||ro)?{nr,ro}:null; }catch(e){ return null; } }));
+  C.base=new THREE.MeshStandardMaterial({roughness:.85,metalness:0});   // also the look a body keeps if its maps fail to load
   if(ASSETS.closed)return; ASSETS.chars=C; }
 function pedMat(o){ const C=ASSETS.chars,fem=!!o.skirt||(o.face>=0&&FACES[o.face]&&!!FACES[o.face].g);
   let pool=(fem?[2,2,2,3]:[0,1]).filter(i=>C.skins[i]); if(!pool.length)pool=[0,1,2,3].filter(i=>C.skins[i]); const si=pool[Math.floor(Math.random()*pool.length)];
   const sc=new C3(o.jacket||o.shirt||'#ffffff'),t=new C3(1,1,1).lerp(sc,.26),q=v=>Math.round(v*6)/6; t.setRGB(q(t.r),q(t.g),q(t.b)); const key=si+'|'+t.getHexString();
   if(!C.mats[key]){ const m=C.base.clone(); m.map=C.skins[si]; m.color.copy(t).multiplyScalar(.95);
-    // Detail maps ride along with the skin they were derived from, so cloth grain matches the body underneath it.
-    const det=C.detail&&C.detail[si]; if(det){ if(det.d)m.map=det.d; if(det.nr){m.normalMap=det.nr; m.normalScale=new THREE.Vector2(.55,.55);} if(det.ro){m.roughnessMap=det.ro; m.roughness=.9;} m.metalness=0; }
+    // The diffuse map stays the untouched skin. The atlas-aligned maps ride along with the skin they were built for. The
+    // roughness map already holds the final values (skin .62, hair .74, cloth .90), so the material factor is 1.
+    const det=C.detail&&C.detail[si]; if(det){ if(det.nr){m.normalMap=det.nr; m.normalScale=new THREE.Vector2(.6,.6);} if(det.ro){m.roughnessMap=det.ro; m.roughness=1;} }
+    m.metalness=0;
     C.mats[key]=m; } return C.mats[key]; }
 // Adds a skinned model next to the procedural body. The procedural body stays built and is shown for every pose the clips cannot do.
 function attachPedModel(h,o,role){ const C=ASSETS.chars; if(!C||PROC_ROLES.has(role)||PROC_KINDS.has(o.kind))return; try{
