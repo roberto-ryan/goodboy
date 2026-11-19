@@ -24,7 +24,7 @@ to its procedural surfaces and bodies.
 
 ## Assets
 
-Textures from Polyhaven and models from Kenney, both CC0. The key art is original.
+Textures from Polyhaven, the cars from Kenney and the pedestrian from Quaternius (via Poly Pizza), all CC0. The key art is original.
 
 ## Deploying
 
