@@ -13,10 +13,18 @@ assets from it.
 
 ## Running locally
 
-Open `index.html` in a browser. There is no build step and no server required.
+Open `index.html` in a browser, or serve the folder with any static server. There is
+no build step.
 
 Three.js and the Fredoka font load from public CDNs, so the first load needs a
-network connection.
+network connection. The photo textures and the car and character models in `assets/`
+load over HTTP, so open the game through a server (for example `python3 -m http.server`)
+to see them. Opened straight from the filesystem, the game still runs and falls back
+to its procedural surfaces and bodies.
+
+## Assets
+
+Textures from Polyhaven and models from Kenney, both CC0. The key art is original.
 
 ## Deploying
 
