@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.min.js"}}</script>
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>Grand Theft Doggo</title>
 <meta name="description" content="A browser open-world game about being a good dog in a bad city. A loving GTA parody in one self-contained HTML file.">
@@ -432,8 +433,9 @@ if(!_glProbe){
   throw new Error('WebGL unavailable, showing the key art instead');
 }
 // 3D engine: three.js r170 from a CDN, with fallbacks
-const THREE = await (async()=>{ const V='0.170.0', urls=['https://cdnjs.cloudflare.com/ajax/libs/three.js/'+V+'/three.module.min.js','https://cdn.jsdelivr.net/npm/three@'+V+'/build/three.module.min.js','https://unpkg.com/three@'+V+'/build/three.module.min.js','./three.module.min.js'];
-  for(const u of urls){ try{ const m=await import(u); if(m&&m.WebGLRenderer)return m; }catch(e){} } return null; })();
+let THREE_URL='';
+const THREE = await (async()=>{ const V='0.170.0', urls=['https://cdn.jsdelivr.net/npm/three@'+V+'/build/three.module.min.js','https://cdnjs.cloudflare.com/ajax/libs/three.js/'+V+'/three.module.min.js','https://unpkg.com/three@'+V+'/build/three.module.min.js','./three.module.min.js'];
+  for(const u of urls){ try{ const m=await import(u); if(m&&m.WebGLRenderer){ THREE_URL=u; return m; } }catch(e){} } return null; })();
 if(!THREE){ const l=document.getElementById('ltext'); if(l)l.textContent="Couldn't load the 3D engine. Check your connection and reload."; throw new Error('three.js failed to load'); }
 
 /* =====================================================================
@@ -1441,6 +1443,137 @@ function carSetTurn(c){ const B=W.RN[c.to],N=W.RN[c.next],d2x=Math.sign(N.x-B.x)
   if(d2x===c.dx&&d2z===c.dz){ c.p1x=(c.p0x+c.p2x)/2; c.p1z=(c.p0z+c.p2z)/2; } else { const t=(c.p2x-c.p0x)*c.dx+(c.p2z-c.p0z)*c.dz; c.p1x=c.p0x+c.dx*t; c.p1z=c.p0z+c.dz*t; }
   let L=0,px=c.p0x,pz=c.p0z; for(let i=1;i<=8;i++){ const t=i/8,u=1-t,x=u*u*c.p0x+2*u*t*c.p1x+t*t*c.p2x,z=u*u*c.p0z+2*u*t*c.p1z+t*t*c.p2z; L+=hyp(x-px,z-pz); px=x; pz=z; } c.len=L; c.s=0; c.seg='turn'; }
 function carUnlock(c){ if(!c.locked)return; const L=c.locked.locks,i=L.indexOf(c); if(i>=0)L.splice(i,1); c.locked=null; }
+/* =====================================================================
+   ASSETS: photo surfaces, Kenney car models, rigged pedestrian.
+   Every load degrades on its own: a missing or failed file leaves the
+   procedural surface / car / body in place, and the game runs either way.
+   ===================================================================== */
+const ASSETS={cars:{},carTex:null,chars:null,closed:false};
+const JSD_BASE='https://cdn.jsdelivr.net/npm/three@0.170.0/';
+// Physical size of one photo tile, in metres. Road and sidewalk UVs are already world/4.6 and world/3,
+// so repeat = (metres per UV unit) / (metres per photo tile).
+const PHOTO={roadM:8,roadUV:4.6,walkM:2.4,walkUV:3,plasterM:3};
+const withTimeout=(p,ms)=>Promise.race([Promise.resolve(p).catch(()=>null),new Promise(r=>setTimeout(()=>r(null),ms))]);
+function loadTex(url,o={}){ return new Promise(res=>{ try{ new THREE.TextureLoader().load(url,t=>{
+    if(o.srgb)t.colorSpace=THREE.SRGBColorSpace;
+    if(o.flipY===false)t.flipY=false;
+    if(o.rep){ t.wrapS=t.wrapT=THREE.RepeatWrapping; t.repeat.set(o.rep,o.rep); t.anisotropy=Math.min(4,ANISO); }
+    if(o.nomip){ t.generateMipmaps=false; t.minFilter=THREE.LinearFilter; }
+    res(t); },undefined,()=>res(null)); }catch(e){ res(null); } }); }
+
+/* ---- photo surfaces (Polyhaven 1k): road, sidewalk, plaster facades ---- */
+async function loadSurfaces(){ const U='assets/tex/';
+  const swap=async(mat,name,tileM,uvM,tone)=>{ if(!mat)return; const rep=uvM/tileM;
+    const [d,n,r]=await Promise.all([loadTex(U+name+'_diff.jpg',{srgb:true,rep}),loadTex(U+name+'_nor.jpg',{rep}),loadTex(U+name+'_rough.jpg',{rep})]);
+    if(!d)return;                                   // no photo, keep the procedural canvas map and normals untouched
+    mat.map=d; if(n)mat.normalMap=n; if(r){ mat.roughnessMap=r; mat.roughness=1; } if(tone)mat.color.setScalar(tone); mat.needsUpdate=true; };
+  const pl=await Promise.all([ swap(Mat.asphalt,'road',PHOTO.roadM,PHOTO.roadUV,.66), swap(Mat.walk,'walk',PHOTO.walkM,PHOTO.walkUV,1.25), loadTex(U+'plaster_diff.jpg',{srgb:true,rep:1}) ]).then(a=>a[2]);
+  if(pl){ plasterFacades(pl); } }
+// Plaster photo multiplied into the wall areas of the plaster-like facade styles. Mapped in world space (so one tile is
+// plasterM metres on any wall), masked by the ORM roughness (walls only, not frames or glass), and multiplied into the
+// existing map and vertex colours rather than replacing them.
+function plasterFacades(pl){ for(const k of ['sand','stucco','deco']){ const m=Mat.facade[k]; if(!m)continue;
+    m.onBeforeCompile=sh=>{ sh.uniforms.uPl={value:pl}; sh.uniforms.uPlS={value:1/PHOTO.plasterM};
+      sh.vertexShader=sh.vertexShader.replace('#include <common>','#include <common>\nvarying vec3 vPlP; varying vec3 vPlN;').replace('#include <project_vertex>','#include <project_vertex>\n vPlP=(modelMatrix*vec4(transformed,1.0)).xyz; vPlN=normalize(mat3(modelMatrix)*objectNormal);');
+      sh.fragmentShader=sh.fragmentShader.replace('#include <common>','#include <common>\nvarying vec3 vPlP; varying vec3 vPlN; uniform sampler2D uPl; uniform float uPlS;').replace('#include <map_fragment>','#include <map_fragment>\n{ vec3 an=abs(vPlN); vec2 pu=an.y>.7?vPlP.xz:(an.x>an.z?vPlP.zy:vPlP.xy); vec3 ph=texture2D(uPl,pu*uPlS).rgb/vec3(.50,.447,.373); float wm=smoothstep(.75,.85,texture2D(roughnessMap,vRoughnessMapUv).g); diffuseColor.rgb*=mix(vec3(1.0),clamp(ph,.45,1.6),wm*.9); }'); };
+    m.needsUpdate=true; } }
+
+/* ---- Kenney cars ---- */
+const CARMODEL={   // procedural kind/type -> GLB, plus the palette cell (col,row of the 8x4 colormap) and colour that is the body paint
+  sedan:{f:'sedan',cell:[6,1],ref:'#cf534f'}, sports:{f:'sedan-sports',cell:[6,1],ref:'#cf534f'}, hatch:{f:'hatchback-sports',cell:[3,1],ref:'#61cb8b'},
+  suv:{f:'suv',cell:[3,1],ref:'#61cb8b'}, pickup:{f:'truck',cell:[3,1],ref:'#61cb8b'}, van:{f:'van',cell:[7,1],ref:'#6794d9'},
+  taxi:{f:'taxi',cell:[4,1],ref:'#ffc044'}, amb:{f:'ambulance',cell:[6,2],ref:'#ffffff'} };   // bus has no counterpart and stays procedural
+function mergeGeos(list){ let nv=0,ni=0; for(const g of list){ const c=g.attributes.position.count; nv+=c; ni+=g.index?g.index.count:c; }
+  const P=new Float32Array(nv*3),N=new Float32Array(nv*3),U=new Float32Array(nv*2),I=new Uint32Array(ni); let vo=0,io=0;
+  for(const g of list){ const p=g.attributes.position,n=g.attributes.normal,u=g.attributes.uv,c=p.count;
+    for(let i=0;i<c;i++){ const a=(vo+i)*3; P[a]=p.getX(i); P[a+1]=p.getY(i); P[a+2]=p.getZ(i); N[a]=n.getX(i); N[a+1]=n.getY(i); N[a+2]=n.getZ(i); U[(vo+i)*2]=u.getX(i); U[(vo+i)*2+1]=u.getY(i); }
+    if(g.index){ const k=g.index.count; for(let i=0;i<k;i++)I[io+i]=g.index.getX(i)+vo; io+=k; } else { for(let i=0;i<c;i++)I[io+i]=vo+i; io+=c; }
+    vo+=c; }
+  const m=new THREE.BufferGeometry(); m.setAttribute('position',new THREE.BufferAttribute(P,3)); m.setAttribute('normal',new THREE.BufferAttribute(N,3)); m.setAttribute('uv',new THREE.BufferAttribute(U,2)); m.setIndex(new THREE.BufferAttribute(I,1)); return m; }
+// Split one car GLB into: a merged static body (doors, spoiler, grille, arm, bin baked in) and four wheel meshes with their centres.
+function carRaw(gltf){ const sc=gltf.scene; sc.updateMatrixWorld(true); const body=[],wheels=[];
+  sc.traverse(o=>{ if(!o.isMesh)return; const g=o.geometry.clone();
+    if(/^wheel/.test(o.name)){ const piv=new THREE.Vector3().setFromMatrixPosition(o.matrixWorld); g.applyMatrix4(new THREE.Matrix4().extractRotation(o.matrixWorld)); g.computeBoundingBox(); const c=g.boundingBox.getCenter(new THREE.Vector3()); wheels.push({g,c,piv}); }
+    else { g.applyMatrix4(o.matrixWorld); body.push(g); } });
+  if(!body.length||wheels.length<4)throw new Error('car glb layout');
+  const geo=mergeGeos(body); geo.computeBoundingBox(); const bb=geo.boundingBox.clone(); const w0=wheels[0].g.boundingBox;
+  return {body:geo,bb,wheels,wr:(w0.max.y-w0.min.y)/2}; }
+async function loadCars(GLTFLoader){ const cm=await loadTex('assets/cars/Textures/colormap.png',{srgb:true,flipY:false,nomip:true}); if(!cm)return;
+  const ld=new GLTFLoader(),out={};
+  await Promise.all([...new Set(Object.values(CARMODEL).map(m=>m.f))].map(async f=>{ try{ out[f]=carRaw(await ld.loadAsync('assets/cars/'+f+'.glb')); }catch(e){} }));
+  if(ASSETS.closed||!Object.keys(out).length)return; ASSETS.carTex=cm; ASSETS.cars=out; }
+// One InstancedMesh per car kind: body and the four wheels in a single geometry, so a kind is one draw call.
+// Body is scaled non-uniformly to the procedural car's length/width/height (the Kenney cars are chunky); wheels are scaled
+// uniformly so they stay round. Wheel vertices carry their axle centre in aCen (w=1) and spin about X in the vertex shader
+// by the per-instance aSpin, which is fed the existing wheel angle. Body paint is tinted per instance by aTint, masked to the
+// body's palette cell so glass, tyres and lights keep their colours.
+function carModelFor(kind,type,cp,count){ const mk=CARMODEL[kind]||CARMODEL[type]; if(!mk||!ASSETS.carTex)return null; const R=ASSETS.cars[mk.f]; if(!R)return null;
+  const bb=R.bb,cz=(bb.min.z+bb.max.z)/2,sx=2*cp.hw/(bb.max.x-bb.min.x),sz=2*cp.hl/(bb.max.z-bb.min.z),sy=cp.h/bb.max.y,ws=sy;
+  const body=R.body.clone(); body.translate(0,0,-cz); body.scale(sx,sy,sz); const parts=[body],cens=[];
+  for(const w of R.wheels){ const g=w.g.clone(); g.translate(-w.c.x,-w.c.y,-w.c.z); g.scale(ws,ws,ws); const C=new THREE.Vector3(w.piv.x+w.c.x,w.piv.y+w.c.y,w.piv.z+w.c.z-cz).multiply(new THREE.Vector3(sx,sy,sz)); g.translate(C.x,C.y,C.z); parts.push(g); cens.push(C); }
+  const geo=mergeGeos(parts),nv=geo.attributes.position.count,aC=new Float32Array(nv*4); let o=parts[0].attributes.position.count;
+  cens.forEach((C,i)=>{ const c=parts[i+1].attributes.position.count; for(let v=0;v<c;v++){ const a=(o+v)*4; aC[a]=C.x; aC[a+1]=C.y; aC[a+2]=C.z; aC[a+3]=1; } o+=c; });
+  geo.setAttribute('aCen',new THREE.BufferAttribute(aC,4));
+  const tint=new THREE.InstancedBufferAttribute(new Float32Array(count*3).fill(1),3),spinA=new THREE.InstancedBufferAttribute(new Float32Array(count),1); spinA.setUsage(THREE.DynamicDrawUsage);
+  geo.setAttribute('aTint',tint); geo.setAttribute('aSpin',spinA);
+  const rc=new C3(mk.ref),refLum=.2126*rc.r+.7152*rc.g+.0722*rc.b,mat=new THREE.MeshStandardMaterial({map:ASSETS.carTex,roughness:.5,metalness:.12});
+  mat.onBeforeCompile=sh=>{ sh.uniforms.uPaint={value:new THREE.Vector3(mk.cell[0],mk.cell[1],refLum)};
+    sh.vertexShader=sh.vertexShader.replace('#include <common>','#include <common>\nattribute vec4 aCen; attribute vec3 aTint; attribute float aSpin; varying vec3 vTint;')
+      .replace('#include <beginnormal_vertex>','#include <beginnormal_vertex>\n if(aCen.w>.5){ float cs=cos(aSpin),sn=sin(aSpin); objectNormal=vec3(objectNormal.x,objectNormal.y*cs-objectNormal.z*sn,objectNormal.y*sn+objectNormal.z*cs); }')
+      .replace('#include <begin_vertex>','#include <begin_vertex>\n if(aCen.w>.5){ float cs=cos(aSpin),sn=sin(aSpin); vec3 d=transformed-aCen.xyz; transformed=aCen.xyz+vec3(d.x,d.y*cs-d.z*sn,d.y*sn+d.z*cs); }\n vTint=aTint;');
+    sh.fragmentShader=sh.fragmentShader.replace('#include <common>','#include <common>\nvarying vec3 vTint; uniform vec3 uPaint;')
+      .replace('#include <map_fragment>','#include <map_fragment>\n{ vec2 pc=floor(vMapUv*vec2(8.,4.)+.001); float pm=step(abs(pc.x-uPaint.x),.5)*step(abs(pc.y-uPaint.y),.5); float lum=dot(diffuseColor.rgb,vec3(.2126,.7152,.0722)); diffuseColor.rgb=mix(diffuseColor.rgb,vTint*(lum/max(uPaint.z,.02)),pm); }'); };
+  const m=new THREE.InstancedMesh(geo,mat,count); m.castShadow=true; m.receiveShadow=true; m.frustumCulled=false; scene.add(m);
+  // the model's lamps sit lower than the procedural ones; keep the existing light sprites on the new body
+  cp.ly=cp.h*.36; cp.ty=cp.h*.38; cp.lx=cp.hw*.62;
+  return {cp,model:true,paint:m,ms:[m],tint,spinA,spinK:cp.wheels[0].r/(R.wr*ws)}; }
+
+/* ---- Kenney character: skinned, run + idle clips, four skins ---- */
+const HUMAN_TOP=1.83/1.75;   // buildHuman: top of hair = 1.5s+.33s = 1.83s with s=H/1.75, so visible height is 1.046 H
+const MODEL_POSES=new Set(['walk','run','idle','wait','chat','lean','phone']);   // poses the run/idle clips can honestly show
+const PROC_ROLES=new Set(['officer','medic','mail','vendor','thrower']), PROC_KINDS=new Set(['worker','granny']);   // props / uniforms the model lacks
+function prepChar(SU,gCh,gRun,gIdle){ const V=THREE.Vector3,tpl=new THREE.Group(); tpl.add(gCh.scene); const box=new THREE.Box3(),sz=new V();
+  tpl.updateMatrixWorld(true); box.setFromObject(tpl,true); box.getSize(sz);
+  if(sz.z>sz.y){ tpl.rotation.x=-PI/2; tpl.updateMatrixWorld(true); }          // long axis is Z: stand it up
+  const bone=n=>{ let b=null; tpl.traverse(o=>{ if(!b&&o.name===n)b=o; }); return b; },bf=bone('LeftFoot'),bt=bone('LeftToes');
+  if(bf&&bt){ const a=new V(),b=new V(); bf.getWorldPosition(a); bt.getWorldPosition(b); if(b.z<a.z-1e-3){ tpl.rotation.y=PI; tpl.updateMatrixWorld(true); } }   // toes must point +z like the procedural body
+  const clipOf=(g,re)=>g.animations.find(a=>re.test(a.name)),run=clipOf(gRun,/Run$/),idle=clipOf(gIdle,/Idle$/); if(!run||!idle)throw new Error('clips');
+  const probe=SU.clone(tpl),mx=new THREE.AnimationMixer(probe); let minY=Infinity,hI=0;
+  const sample=(clip,t,first)=>{ mx.stopAllAction(); mx.clipAction(clip).play(); mx.setTime(t); probe.updateMatrixWorld(true); box.setFromObject(probe,true); minY=Math.min(minY,box.min.y); if(first)hI=box.max.y-box.min.y; };
+  sample(idle,0,true); sample(idle,idle.duration*.5); for(const f of[0,.25,.5,.75])sample(run,run.duration*f);
+  // Ground speed the run clip actually covers at timeScale 1, in body heights per second: how fast the planted foot travels back
+  // relative to the hips. Playing the clip at (ped speed / that) keeps the feet from skating.
+  const pb={}; probe.traverse(n=>{ if(n.name==='LeftFoot'||n.name==='Hips')pb[n.name]=n; }); let gs=0;
+  if(pb.LeftFoot&&pb.Hips){ const N=40,fz=[],fy=[],a=new V(),b=new V(); for(let i=0;i<=N;i++){ mx.stopAllAction(); mx.clipAction(run).play(); mx.setTime(run.duration*i/N); probe.updateMatrixWorld(true); pb.LeftFoot.getWorldPosition(a); pb.Hips.getWorldPosition(b); fz.push(a.z-b.z); fy.push(a.y); }
+    const lim=Math.min(...fy)+.03*hI; let sum=0,n=0; for(let i=1;i<=N;i++)if(fy[i]<lim&&fy[i-1]<lim){ sum+=-(fz[i]-fz[i-1])/(run.duration/N); n++; } if(n>2&&sum>0)gs=sum/n/hI; }
+  mx.stopAllAction(); if(!(hI>0)||!isFinite(minY))throw new Error('char measure');
+  return {scene:tpl,run,idle,hI,minY,gs,SU,skins:[],mats:{},base:null}; }
+async function loadChars(GLTFLoader,SU){ const ld=new GLTFLoader(),L=n=>ld.loadAsync('assets/chars/'+n+'.glb');
+  const [gc,gr,gi]=await Promise.all([L('character'),L('run'),L('idle')]);
+  const skins=await Promise.all(['criminalMaleA','skaterMaleA','skaterFemaleA','cyborgFemaleA'].map(n=>loadTex('assets/chars/Skins/'+n+'.png',{srgb:true,flipY:false})));
+  if(!skins.some(Boolean))return; const C=prepChar(SU,gc,gr,gi); C.skins=skins; C.base=new THREE.MeshStandardMaterial({roughness:.72,metalness:0});
+  if(ASSETS.closed)return; ASSETS.chars=C; }
+function pedMat(o){ const C=ASSETS.chars,fem=!!o.skirt||(o.face>=0&&FACES[o.face]&&!!FACES[o.face].g);
+  let pool=(fem?[2,2,2,3]:[0,1]).filter(i=>C.skins[i]); if(!pool.length)pool=[0,1,2,3].filter(i=>C.skins[i]); const si=pool[Math.floor(Math.random()*pool.length)];
+  const sc=new C3(o.jacket||o.shirt||'#ffffff'),t=new C3(1,1,1).lerp(sc,.26),q=v=>Math.round(v*6)/6; t.setRGB(q(t.r),q(t.g),q(t.b)); const key=si+'|'+t.getHexString();
+  if(!C.mats[key]){ const m=C.base.clone(); m.map=C.skins[si]; m.color.copy(t).multiplyScalar(.95); C.mats[key]=m; } return C.mats[key]; }
+// Adds a skinned model next to the procedural body. The procedural body stays built and is shown for every pose the clips cannot do.
+function attachPedModel(h,o,role){ const C=ASSETS.chars; if(!C||PROC_ROLES.has(role)||PROC_KINDS.has(o.kind))return; try{
+    const root=C.SU.clone(C.scene),g=new THREE.Group(); g.add(root); let sm=null; root.traverse(n=>{ if(n.isSkinnedMesh)sm=n; }); if(!sm)return;
+    const k=h.H*HUMAN_TOP/C.hI,wx=1+((o.wide||1)-1)*.6; g.scale.set(k*wx,k,k*wx); g.position.y=-h.hipY-C.minY*k;   // heel of the lowest foot sits on y=0
+    sm.material=pedMat(o); sm.frustumCulled=false; sm.castShadow=true; sm.receiveShadow=true;
+    const mixer=new THREE.AnimationMixer(root),run=mixer.clipAction(C.run),idle=mixer.clipAction(C.idle); idle.play(); idle.time=Math.random()*C.idle.duration; g.visible=false; h.inner.add(g);
+    h.mdl={g,sm,mixer,run,idle,cur:idle,v1:C.gs>0?C.gs*h.H*HUMAN_TOP:0}; }catch(e){ h.mdl=null; } }
+function pedModelStep(md,pose,speed,dt){ const loco=speed>.15&&(pose==='walk'||pose==='run'||pose==='phone'),want=loco?md.run:md.idle;
+  if(want!==md.cur){ const from=md.cur; md.cur=want; want.reset(); want.time=Math.random()*want.getClip().duration; want.play(); from.crossFadeTo(want,.2,false); }
+  if(loco)md.run.timeScale=clamp(md.v1>0?speed/md.v1:speed*.37,.25,2.2);   // clip's own ground speed (measured in prepChar) so the planted foot matches the pavement; idle plays at 1
+  md.mixer.update(dt); }
+
+async function loadAssets(){ const A=ASSETS; let GL=null,SU=null;
+  if(THREE_URL===JSD_BASE+'build/three.module.min.js'){ try{ const m=await withTimeout(Promise.all([import(JSD_BASE+'examples/jsm/loaders/GLTFLoader.js'),import(JSD_BASE+'examples/jsm/utils/SkeletonUtils.js')]),15000); if(m){ GL=m[0].GLTFLoader; SU=m[1]; } }catch(e){} }
+  const jobs=[withTimeout(loadSurfaces(),25000)];
+  if(GL&&SU&&SU.clone){ jobs.push(withTimeout(loadCars(GL),25000),withTimeout(loadChars(GL,SU),25000)); }
+  await Promise.all(jobs); }
 const _m4=new M4(),_m5=new M4(),_m6=new M4();
 const Cars={list:[],pools:null,pts:null,wheels:null,nw:0,
   kinds:{},
@@ -1448,17 +1581,18 @@ const Cars={list:[],pools:null,pts:null,wheels:null,nw:0,
     for(let i=0;i<QL.cars;i++){ const r=Math.random(); let type=r<.28?'sedan':r<.43?'hatch':r<.63?'suv':r<.73?'pickup':r<.81?'van':r<.88?'sports':'sedan',taxi=r>=.88; if(bus&&i%9===1){ type='bus'; taxi=false; bus--; } const kind=taxi?'taxi':type; plan.push({type,taxi,kind,ii:cnt[kind]||0}); cnt[kind]=(cnt[kind]||0)+1; }
     plan.push({type:'van',taxi:false,kind:'amb',ii:0}); cnt.amb=1;
     for(const kind in cnt){ const type=kind==='taxi'?'sedan':kind==='amb'?'van':kind,cp=carParts(type,'#ffffff',kind==='amb'?'amb':kind==='taxi',QL.tier>1?2:1),ca=cp.paint.attributes.color.array,isP=v=>ca[v*3]>.999&&ca[v*3+1]>.999&&ca[v*3+2]>.999;
+      let mdl=null; try{ mdl=carModelFor(kind,type,cp,cnt[kind]); }catch(e){ mdl=null; } if(mdl){ this.kinds[kind]=mdl; continue; }   // Kenney model, else the procedural car below
       const mk=(g,mat,cast)=>{ const m=new THREE.InstancedMesh(g,mat,cnt[kind]); m.castShadow=cast; m.receiveShadow=true; m.frustumCulled=false; scene.add(m); return m; };
-      this.kinds[kind]={cp,paint:mk(geoPick(cp.paint,isP),Mat.paint,true),trim:mk(geoPick(cp.paint,v=>!isP(v)),Mat.paint,false),dark:mk(cp.dark,Mat.cdark,false)}; }
+      this.kinds[kind]={cp,paint:mk(geoPick(cp.paint,isP),Mat.paint,true),trim:mk(geoPick(cp.paint,v=>!isP(v)),Mat.paint,false),dark:mk(cp.dark,Mat.cdark,false)}; this.kinds[kind].ms=[this.kinds[kind].paint,this.kinds[kind].trim,this.kinds[kind].dark]; }
     const tc=new C3();
-    for(let i=0;i<plan.length;i++){ const {type,taxi,kind,ii}=plan[i],K=this.kinds[kind],cp=K.cp,amb=kind==='amb'; tc.set(amb?'#f6f6f2':type==='bus'?'#e9e9e4':taxi?'#e8b820':rpick(CARCOLS)); K.paint.setColorAt(ii,tc);
+    for(let i=0;i<plan.length;i++){ const {type,taxi,kind,ii}=plan[i],K=this.kinds[kind],cp=K.cp,amb=kind==='amb'; tc.set(amb?'#f6f6f2':type==='bus'?'#e9e9e4':taxi?'#e8b820':rpick(CARCOLS)); if(K.model)K.tint.setXYZ(ii,tc.r,tc.g,tc.b); else K.paint.setColorAt(ii,tc);
       const sr=Math.random(),style=type==='bus'||amb?0:sr<.4?0:sr<.75?1:2;   // 0 careful, 1 distracted, 2 maniac
       const c={K,ii,cp,hw:cp.hw,hl:cp.hl,h:cp.h,type,style,speed:rnd(4,8),max:type==='bus'?7.5:style===2?rnd(12.5,15):rnd(8.4,10.6),distracted:style>0,stun:0,honk:0,blockT:0,seeT:0,pedT:0,locked:null,x:0,z:0,yaw:0,headH:cp.h+.5,y:0,voice:.8,waitT:0,lockT:0,spin:0,pitch:0,wob:0,hitCD:0,w0:this.nw,talkCD:0};
-      this.nw+=cp.wheels.length;
+      if(!K.model)this.nw+=cp.wheels.length;
       let A,key,g2=0; do{ A=rpick(W.RN.filter(n=>n)); c.from=A.i; c.to=rpick(A.nb); key=c.from+'_'+c.to; }while(used.has(key)&&g2++<60); used.add(key);
       carSetLane(c); c.s=rnd(4,c.len-18); this.pos(c); this.list.push(c); if(amb){ c.amb=true; c.ambState='cruise'; Amb.car=c; } }
-    for(const k in this.kinds)this.kinds[k].paint.instanceColor.needsUpdate=true;
-    const n=this.list.length; this.wheels=new THREE.InstancedMesh(wheelGeo(QL.tier>1),Mat.wheel,this.nw); this.wheels.castShadow=false; this.wheels.frustumCulled=false; scene.add(this.wheels);
+    for(const k in this.kinds){ const K=this.kinds[k]; if(K.model)K.tint.needsUpdate=true; else K.paint.instanceColor.needsUpdate=true; }
+    const n=this.list.length; this.wheels=new THREE.InstancedMesh(wheelGeo(QL.tier>1),Mat.wheel,Math.max(1,this.nw)); this.wheels.castShadow=false; this.wheels.frustumCulled=false; scene.add(this.wheels);
     this.pools=new THREE.InstancedMesh(new THREE.PlaneGeometry(1,1).rotateX(-PI/2),Mat.pool.clone(),n); this.pools.material.color.set(0xfff0c8); this.pools.frustumCulled=false; this.pools.visible=false; this.pools.renderOrder=2; scene.add(this.pools);
     const pg=new THREE.BufferGeometry(); this.pp=new Float32Array(n*18); this.pc=new Float32Array(n*18); for(let i=0;i<n;i++){ for(let k=0;k<2;k++){ this.pc.set([1,.95,.8],i*18+k*3); this.pc.set([.5,.04,.03],i*18+6+k*3); this.pc.set([1,.55,.05],i*18+12+k*3); } }
     pg.setAttribute('position',new THREE.BufferAttribute(this.pp,3)); pg.setAttribute('color',new THREE.BufferAttribute(this.pc,3));
@@ -1506,9 +1640,9 @@ const Cars={list:[],pools:null,pts:null,wheels:null,nw:0,
       c.s+=c.speed*dt; c.spin+=c.speed*dt/c.cp.wheels[0].r;
       if(c.s>=c.len){ if(c.seg==='lane')carSetTurn(c); else { carUnlock(c); c.from=c.to; c.to=c.next; carSetLane(c); } }
       this.pos(c); const d2=dist2(c.x,c.z,cx,cz),vis=d2<230*230; const acc=(c.speed-sp0)/Math.max(dt,.001); c.pitch=damp(c.pitch,clamp(-acc*.0035,-.05,.045),6,dt);
-      const wy=c.wob>0?Math.sin(c.wob*22)*.07*c.wob:0; { M.makeRotationY(c.yaw+wy); if(c.pitch){ _m6.makeRotationX(c.pitch); M.multiply(_m6); } M.setPosition(c.x,0,c.z); const K=c.K; K.paint.setMatrixAt(c.ii,M); K.trim.setMatrixAt(c.ii,M); K.dark.setMatrixAt(c.ii,M); if(d2<120*120)Blobs.add(c.x,0,c.z,c.hw*2.7,c.hl*2.35,c.yaw); }
+      const wy=c.wob>0?Math.sin(c.wob*22)*.07*c.wob:0; { M.makeRotationY(c.yaw+wy); if(c.pitch){ _m6.makeRotationX(c.pitch); M.multiply(_m6); } M.setPosition(c.x,0,c.z); const K=c.K; for(let q=0;q<K.ms.length;q++)K.ms[q].setMatrixAt(c.ii,M); if(d2<120*120)Blobs.add(c.x,0,c.z,c.hw*2.7,c.hl*2.35,c.yaw); }
       if(c.waitT>3&&c.honk<=0&&d2<70*70&&Math.random()<dt*.22){ c.honk=rnd(2.5,6); Snd.horn(clamp(1-Math.sqrt(d2)/70,0,1)*.45); }
-      _m5.makeRotationY(c.yaw+wy); _m5.setPosition(c.x,0,c.z); const ws=c.cp.wheels; for(let k=0;k<ws.length;k++){ const w=ws[k]; _m6.makeRotationX(c.spin); _m6.setPosition(w.x,w.r,w.z); _m6.scale(_v.set(w.r,w.r,w.r)); M.multiplyMatrices(_m5,_m6); this.wheels.setMatrixAt(c.w0+k,M); }
+      if(c.K.model)c.K.spinA.array[c.ii]=c.spin*c.K.spinK; else { _m5.makeRotationY(c.yaw+wy); _m5.setPosition(c.x,0,c.z); const ws=c.cp.wheels; for(let k=0;k<ws.length;k++){ const w=ws[k]; _m6.makeRotationX(c.spin); _m6.setPosition(w.x,w.r,w.z); _m6.scale(_v.set(w.r,w.r,w.r)); M.multiplyMatrices(_m5,_m6); this.wheels.setMatrixAt(c.w0+k,M); } }
       const dd=dist2(c.x,c.z,Dog.x,Dog.z); if(dd<nearD){ nearD=dd; nearC=c; }
       const rx=fz,rz=-fx,pp=this.pp,o=i*18,braking=acc<-1.5||c.speed<.3,sgn=c.turn==='R'?-1:1,sig=nearEnd&&c.turn!=='S'&&blink;
       for(let k=0;k<2;k++){ const s=k?-1:1,lx=c.cp.lx*s; pp[o+k*3]=c.x+fx*(c.hl+.05)+rx*lx; pp[o+k*3+1]=c.cp.ly; pp[o+k*3+2]=c.z+fz*(c.hl+.05)+rz*lx; pp[o+6+k*3]=c.x-fx*(c.hl+.05)+rx*lx; pp[o+7+k*3]=c.cp.ty; pp[o+8+k*3]=c.z-fz*(c.hl+.05)+rz*lx;
@@ -1516,7 +1650,7 @@ const Cars={list:[],pools:null,pts:null,wheels:null,nw:0,
       if(c.amb){ const on=c.ambState!=='cruise',fl=Math.floor(t*7)%2; for(let k=0;k<2;k++){ const sg2=k?-1:1,red=k===fl; pp[o+12+k*3]=c.x+rx*.36*sg2+fx*.5; pp[o+13+k*3]=on?c.h+.22:-20; pp[o+14+k*3]=c.z+rz*.36*sg2+fz*.5; this.pc[o+12+k*3]=red?3.2:.15; this.pc[o+13+k*3]=.12; this.pc[o+14+k*3]=red?.15:3.2; } if(c.ambState==='go'&&c.seg==='lane'&&c.s>=c.stopS)c.speed=Math.min(c.speed,1.5); }
       if(night){ M.makeRotationY(c.yaw); M.scale(_v.set(4.6,1,8)); M.setPosition(c.x+fx*(c.hl+3.6),.07,c.z+fz*(c.hl+3.6)); this.pools.setMatrixAt(i,M); }
     }
-    for(const k in this.kinds){ const K=this.kinds[k]; K.paint.instanceMatrix.needsUpdate=true; K.trim.instanceMatrix.needsUpdate=true; K.dark.instanceMatrix.needsUpdate=true; }
+    for(const k in this.kinds){ const K=this.kinds[k]; for(let q=0;q<K.ms.length;q++)K.ms[q].instanceMatrix.needsUpdate=true; if(K.model)K.spinA.needsUpdate=true; }
     this.recycle(dt);
     this.wheels.instanceMatrix.needsUpdate=true; this.pools.visible=night; if(night){ this.pools.instanceMatrix.needsUpdate=true; this.pools.material.opacity=Env.night*(Post.on?.1:.32); }
     this.pts.geometry.attributes.position.needsUpdate=true; this.pts.geometry.attributes.color.needsUpdate=true; this.pts.material.opacity=lerp(.3,.95,Env.night); this.pts.material.size=lerp(.8,1.5,Env.night);
@@ -2256,7 +2390,7 @@ function pedPickNext(p){ const n=W.PN[p.node]; let opts=n.nb.filter(e=>e.i!==p.p
   if(e.cross){ p.state='waitcross'; p.wait=0; p.xn=nearestRN((n.x+m.x)/2,(n.z+m.z)/2); p.xa=Math.abs(m.x-n.x)>Math.abs(m.z-n.z)?'z':'x'; } else p.state='walk'; }
 const VULN={grabbed:1,down:1,getup:1,flung:1,dizzy:1,slip:1,latched:1};
 const Peds={list:[],poops:[],busker:null,fr:0,
-  make(role,o={}){ const h=buildHuman(o); const p={h,role,kind:'',x:0,z:0,y:0,yaw:rnd(TAU),speed:0,state:'walk',t:0,node:0,next:0,prev:-1,tx:0,tz:0,ox:rnd(-.9,.6),oz:rnd(-.9,.6),walkSp:rnd(1.15,1.6),runSp:rnd(4.4,5.2),
+  make(role,o={}){ const h=buildHuman(o); attachPedModel(h,o,role); const p={h,role,kind:'',x:0,z:0,y:0,yaw:rnd(TAU),speed:0,state:'walk',t:0,node:0,next:0,prev:-1,tx:0,tz:0,ox:rnd(-.9,.6),oz:rnd(-.9,.6),walkSp:rnd(1.15,1.6),runSp:rnd(4.4,5.2),
       lover:Math.random(),timid:Math.random(),fight:Math.random(),brave:Math.random(),petCD:rnd(3),react:rnd(.3),talkCD:0,hitCD:0,kickT:0,kickCD:rnd(1,2),kicks:0,vx:0,vz:0,vy:0,spin:0,tum:0,woozy:false,idle:'idle',
       headH:h.H+.4,pose:'idle',wait:0,dead:false,voice:rnd(.7,1.5),stuckT:0,side:1,catchT:0,ph0:rnd(TAU),post:null,xn:null,xa:'x'};
     scene.add(h.g); this.list.push(p); return p; },
@@ -2301,7 +2435,7 @@ const Peds={list:[],poops:[],busker:null,fr:0,
   respot(p,fx,fz){ const sp=p.spot; if(!sp||p.state!=='idle')return; const d0=dist2(p.x,p.z,Dog.x,Dog.z),wx=p.x-camera.position.x,wz=p.z-camera.position.z,seen=(wx*fx+wz*fz)/(hyp(wx,wz)||1)>.3; if(d0<70*70||(d0<100*100&&seen))return;
     for(let g=0;g<12;g++){ const q=rpick(this.spots); if(q.p)continue; const d=hyp(q.x-Dog.x,q.z-Dog.z); if(d<16||d>78)continue; const vx=q.x-camera.position.x,vz=q.z-camera.position.z; if(d<58&&(vx*fx+vz*fz)/(hyp(vx,vz)||1)>.25&&!hiddenFromCam(q.x,q.z))continue;
       sp.p=null; q.p=p; p.spot=q; p.x=q.x; p.z=q.z; p.y=groundH(q.x,q.z); p.yaw=q.yaw; p.idle=q.pose; p.post={x:q.x,z:q.z,yaw:q.yaw,state:'idle'}; return; } },
-  remove(p){ p.dead=true; if(p.inj)Inj.clear(p); scene.remove(p.h.g); p.h.mesh.geometry.dispose(); p.h.lo.geometry.dispose(); const i=this.list.indexOf(p); if(i>=0)this.list.splice(i,1); },
+  remove(p){ p.dead=true; if(p.inj)Inj.clear(p); scene.remove(p.h.g); p.h.mesh.geometry.dispose(); p.h.lo.geometry.dispose(); if(p.h.mdl){ p.h.mdl.mixer.stopAllAction(); p.h.mdl.sm.skeleton.dispose(); } const i=this.list.indexOf(p); if(i>=0)this.list.splice(i,1); },
   nearest(x,z,maxD,fn){ let b=null,bd=maxD*maxD; for(const p of this.list){ if(fn&&!fn(p))continue; const d=dist2(x,z,p.x,p.z); if(d<bd){bd=d;b=p;} } return b; },
   calm(p){ return p.state==='walk'||p.state==='waitcross'||p.state==='sit'||p.state==='idle'||p.state==='pet'||p.state==='shoo'; },
   flee(p,dur,line){ if(VULN[p.state]||p.state==='fight'||p.role==='officer')return; if(p.seat){ p.seat=null; } p.state='flee'; p.t=dur; if(line&&p.talkCD<=0){ say(p,line); p.talkCD=3; } },
@@ -2394,7 +2528,9 @@ const Peds={list:[],poops:[],busker:null,fr:0,
       p.pose=pose; if(p.state!=='flung'&&!(p.state==='script'&&pose==='down')){ const gy=groundH(p.x,p.z); p.y=damp(p.y,gy,14,dt); }
       const g=p.h.g, d2=dist2(p.x,p.z,cx,cz), vis=d2<125*125&&(d2<81||((p.x-cx)*cfx+(p.z-cz)*cfz)>cview*Math.sqrt(d2)); g.visible=vis;
       if(vis){ g.position.set(p.x,p.y,p.z); g.rotation.y=p.yaw; const inn=p.h.inner; inn.rotation.x=spin?spin:damp(inn.rotation.x,0,12,dt); const hi=d2<NEAR2||p.state==='grabbed'||p.state==='latched',sh=dd<QL.shadowR+3; p.h.mesh.visible=hi; p.h.lo.visible=!hi; p.h.mesh.castShadow=sh; p.h.lo.castShadow=sh;
-        const live=d2<62*62||p.state==='flung'; if(live||((this.fr+i)&3)===0)animHuman(p.h,live?dt:dt*4,t,pose,p.speed);
+        const live=d2<62*62||p.state==='flung',md=p.h.mdl;
+        if(md&&MODEL_POSES.has(pose)){ p.h.mesh.visible=false; p.h.lo.visible=false; md.g.visible=true; md.sm.castShadow=sh; if(live||((this.fr+i)&3)===0)pedModelStep(md,pose,p.speed,live?dt:dt*4); }   // skinned model for walk/idle poses
+        else { if(md)md.g.visible=false; if(live||((this.fr+i)&3)===0)animHuman(p.h,live?dt:dt*4,t,pose,p.speed); }
         if(d2<58*58){ const lie=pose==='down'||pose==='drag'; Blobs.add(p.x,groundH(p.x,p.z),p.z,lie?.55:.62,lie?1.5:.62,p.yaw); } }
     } },
   react(p,dd){ if(Dog.state==='ragdoll'||Dog.state==='ko'){ if(dd<8&&p.talkCD<=0){ say(p,'HIT'); p.talkCD=7; } return; }
@@ -2885,7 +3021,7 @@ const HUD={els:null,last:{},
     for(const key in e.n){ const val=key==='bladder'?1-D.bladder:D[key]; this.set(key,Math.round(val*40),v=>{ e.n[key].style.setProperty('--v',(v*2.5).toFixed(0)); e.n[key].classList.toggle('low',v<7); }); }
     this.set('k',Math.round(D.karma/4),v=>e.k.style.left=(50+v*2)+'%'); this.set('clock',clockStr(),v=>e.clock.textContent=(Env.night>.6?'☾ ':'☀ ')+v);
     this.set('stars',Game.stars,v=>{ for(let i=0;i<3;i++)e.stars[i].classList.toggle('on',i<v); });
-    const c=D.ctx; this.set('act',c?c.l:'—',v=>e.act.textContent=v); this.set('prompt',c&&c.h?c.h:'',v=>e.prompt.innerHTML=v);
+    const c=D.ctx; this.set('act',c?c.l:'-',v=>e.act.textContent=v); this.set('prompt',c&&c.h?c.h:'',v=>e.prompt.innerHTML=v);
     this.set('bite',D.state==='latch'||D.grab?'LET GO':D.carrying?'DROP':'BITE',v=>e.bite.textContent=v); } };
 
 /* ---------------- menus + title ---------------- */
@@ -2941,8 +3077,8 @@ function frame(now){ requestAnimationFrame(frame); const raw=Math.min(.05,(now-_
   Post.night=Env.night; Post.render(); _frames++; }
 (async function boot(){ try{ resize();
     const tick=async(msg,p)=>{ $('ltext').textContent=msg+'…'; $('lbar').firstElementChild.style.width=Math.round(p*100)+'%'; await new Promise(r=>setTimeout(r,40)); };
-    await tick('Mixing paint',.06); makeTextures(); makeMaterials(); await tick('Hanging the sky',.14); initEnv(); Part.init(); Rings.init(); Decals.init(); Bub.init(); Blobs.init(); Post.init(); if(Post.on)$('vignette').style.display='none';
-    await buildWorld(tick); await tick('Waking the neighbours',.84); UI.init(); Dog.setBreed(BREEDS[UI.idx],COLLARS[UI.collarI]);
+    await tick('Mixing paint',.06); makeTextures(); makeMaterials(); const assetsP=loadAssets().catch(()=>{}); await tick('Hanging the sky',.14); initEnv(); Part.init(); Rings.init(); Decals.init(); Bub.init(); Blobs.init(); Post.init(); if(Post.on)$('vignette').style.display='none';
+    await buildWorld(tick); await tick('Dressing the street',.8); await assetsP; ASSETS.closed=true; await tick('Waking the neighbours',.84); UI.init(); Dog.setBreed(BREEDS[UI.idx],COLLARS[UI.collarI]);
     Peds.init(); Cars.init(); Birds.init(); Critters.init(); Ducks.init(); Flutter.init(); Pals.init(); Items.spawnAll(); makeMiniBase();
     await tick('Fetching your dog',.96); UI.showTitle(); updateEnv(0,Dog.x,Dog.z);
     if(location.hostname==='localhost'||location.hostname==='127.0.0.1')window.__g={THREE,Amb,Inj,Cart,Splat,Mat,QL,Post,Ducks,Flutter,Geysers,Vista,Game,Dog,Cam,Env,W,Peds,Cars,Birds,Critters,Pals,Items,Input,UI,Snd,camera,scene,renderer,SAVE,TASKS,Part,BREEDS,frames:()=>_frames,sim(sec){ let t=performance.now()/1000; const n=Math.round(sec*30); for(let i=0;i<n;i++){ t+=1/30; Game.t+=1/30; simStep(1/30,t); } }};
