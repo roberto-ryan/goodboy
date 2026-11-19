@@ -1552,6 +1552,9 @@ function carModelFor(kind,type,cp,count){ const mk=CARMODEL[kind]||CARMODEL[type
   geo.setAttribute('aCen',new THREE.BufferAttribute(aC,4));
   const tint=new THREE.InstancedBufferAttribute(new Float32Array(count*3).fill(1),3),spinA=new THREE.InstancedBufferAttribute(new Float32Array(count),1); spinA.setUsage(THREE.DynamicDrawUsage);
   geo.setAttribute('aTint',tint); geo.setAttribute('aSpin',spinA);
+  // Keep metalness low on purpose: with no environment map bound, a metallic body has nothing to reflect and simply
+  // renders darker than the palette says. Measured: metalness .55 dropped the car region to 69 mean luminance against
+  // 94, so the palette colour is the honest source of car colour in this scene.
   const rc=new C3(mk.ref),refLum=.2126*rc.r+.7152*rc.g+.0722*rc.b,mat=new THREE.MeshStandardMaterial({map:ASSETS.carTex,roughness:.5,metalness:.12});
   mat.onBeforeCompile=sh=>{ sh.uniforms.uPaint={value:new THREE.Vector3(mk.cell[0],mk.cell[1],refLum)};
     sh.vertexShader=sh.vertexShader.replace('#include <common>','#include <common>\nattribute vec4 aCen; attribute vec3 aTint; attribute float aSpin; varying vec3 vTint;')
